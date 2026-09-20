@@ -1,0 +1,113 @@
+diff --git a/dashboard/src/components/arturo/ArturoPill.tsx b/dashboard/src/components/arturo/ArturoPill.tsx
+index 510e058..e1683a7 100644
+--- a/dashboard/src/components/arturo/ArturoPill.tsx
++++ b/dashboard/src/components/arturo/ArturoPill.tsx
+@@ -16,15 +16,16 @@
+  */
+ import { useCallback, useEffect, useRef, useState } from 'react';
+ import { Link, useLocation, useParams } from 'react-router-dom';
+-import { Mic, ArrowUp, X, History, Focus } from 'lucide-react';
++import { Mic, ArrowUp, X, History, Focus, PhoneCall, PhoneOff } from 'lucide-react';
+ import './arturo.css';
+ import { arturoText, newConversationId, contextFromLocation, getArturoFocus, subscribeArturoFocus } from '../../lib/arturo';
+ import {
+   listThreads, loadThread, contextCardLabel, isContextDismissed, dismissContext,
+   restoreContext, contextForTurn, type ThreadSummary,
+ } from '../../lib/arturoThreads';
++import { VoiceSession, type VoiceSessionState } from '../../lib/voiceSession';
+ 
+-interface PillTurn { role: 'user' | 'arturo'; text: string; tools?: string[]; at: number }
++interface PillTurn { role: 'user' | 'arturo'; text: string; tools?: string[]; at: number; live?: boolean }
+ const LS_CONV = 'orchestra.arturo.pill.conversation';
+ 
+ /** Which thread was I in — the ONLY thing still kept in the browser. */
+@@ -60,6 +61,48 @@ export function ArturoPill() {
+   // that is what makes "what is this agent doing" answerable while you sit in its session.
+   const [focus, setFocus] = useState(getArturoFocus);
+   useEffect(() => subscribeArturoFocus(() => setFocus(getArturoFocus())), []);
++
++  // ── live voice call, IN THIS PANE ──────────────────────────────────────────
++  // The same VoiceSession the agent composer's call button uses (lib/voiceSession.ts →
++  // /api/voice/live → gateway /live → Gemini Live). Arturo's words arrive as
++  // {event:"transcript"} frames from the server; YOUR words are captioned on-device by
++  // the browser's SpeechRecognition (startDictation), because the gateway deliberately
++  // does not transcribe the caller. Both render live below the thread, then commit as
++  // turns when final. The call ends with the same `[voice-call: …]` marker the composer
++  // path uses, so the transcript card can be fetched by id later.
++  const [callState, setCallState] = useState<VoiceSessionState>('idle');
++  const [liveUser, setLiveUser] = useState('');
++  const [liveArturo, setLiveArturo] = useState('');
++  const [voiceNote, setVoiceNote] = useState<string | null>(null);
++  const voice = useRef<VoiceSession | null>(null);
++  const appendRef = useRef<(t: PillTurn) => void>(() => {});
++  function voiceSession(): VoiceSession {
++    if (!voice.current) {
++      voice.current = new VoiceSession({
++        onPartial: (text, role) => { if (role === 'user') setLiveUser(text); else setLiveArturo(text); },
++        onFinal: (text, role) => {
++          if (role === 'user') setLiveUser(''); else setLiveArturo('');
++          appendRef.current({ role, text, at: Date.now(), live: true });
++        },
++        onUnavailable: (reason) => setVoiceNote(reason),
++        onStateChange: (s) => setCallState(s),
++        onCallEnded: (marker, id) => {
++          setLiveUser(''); setLiveArturo('');
++          appendRef.current({ role: 'arturo', text: `Call ended (${id}). ${marker}`, at: Date.now(), live: true });
++        },
++      });
++    }
++    return voice.current;
++  }
++  const inCall = callState === 'live' || callState === 'connecting';
++  async function toggleCall() {
++    setVoiceNote(null);
++    if (inCall) { voiceSession().stop(); voiceSession().stopDictation(); return; }
++    const focused = ctx.entityKind && ctx.entityId ? `${ctx.entityKind}:${ctx.entityId}` : null;
++    await voiceSession().start({ route: ctx.route, focusedEntity: focused });
++    voiceSession().startDictation();          // your own captions, on-device
++  }
++  useEffect(() => () => { voice.current?.stop(); voice.current?.stopDictation(); }, []);
+   const routeCtx = contextFromLocation(location.pathname, params as Record<string, string | undefined>, location.search);
+   const ctx = focus
+     ? { ...routeCtx, entityKind: focus.kind, entityId: focus.id }
+@@ -76,6 +119,7 @@ export function ArturoPill() {
+   useEffect(() => { scroller.current?.scrollTo({ top: 1e9, behavior: 'smooth' }); }, [turns, open, busy]);
+ 
+   const append = (t: PillTurn) => setTurns((prev) => [...prev, t]);
++  appendRef.current = append;
+ 
+   async function send() {
+     const text = draft.trim();
+@@ -200,6 +244,10 @@ export function ArturoPill() {
+             </div>
+           ))}
+           {busy && <div className="row arturo"><div className="bubble thinking">Thinking…</div></div>}
++          {liveUser && <div className="row user"><div className="bubble live">{liveUser}…</div></div>}
++          {liveArturo && <div className="row arturo"><div className="bubble live">{liveArturo}…</div></div>}
++          {callState === 'connecting' && <div className="row arturo"><div className="bubble thinking">Connecting the call…</div></div>}
++          {voiceNote && <div className="row arturo"><div className="bubble">I can't do that yet — {voiceNote}.</div></div>}
+         </div>
+ 
+         <textarea ref={ta} rows={1} value={draft} placeholder="Ask Arturo" onChange={(e) => setDraft(e.target.value)}
+@@ -225,6 +273,10 @@ export function ArturoPill() {
+             )}
+           </div>
+           <div className="cluster">
++            <button className={inCall ? 'circle-btn white' : 'circle-btn'} aria-label={inCall ? 'End call' : 'Start voice call'}
++                    aria-pressed={inCall} title={inCall ? 'End call' : 'Talk to Arturo (live)'} onClick={() => void toggleCall()}>
++              {inCall ? <PhoneOff size={18} /> : <PhoneCall size={18} />}
++            </button>
+             <button className="circle-btn white" aria-label="Send" onClick={() => void send()} disabled={busy || !draft.trim()}><ArrowUp size={18} /></button>
+           </div>
+         </div>
+diff --git a/dashboard/src/components/arturo/arturo.css b/dashboard/src/components/arturo/arturo.css
+index db73fbd..8308f39 100644
+--- a/dashboard/src/components/arturo/arturo.css
++++ b/dashboard/src/components/arturo/arturo.css
+@@ -187,3 +187,6 @@
+ .attach-chip button:hover{ color:#fff; }
+ .attach-note{ font-size:12px; color:rgba(255,255,255,0.45); }
+ .attach-error{ font-size:12px; color:#ff8a8a; }
++
++/* live voice call in the pill: partial captions before they commit as turns */
++.arturo-pill-panel .bubble.live { opacity: .75; font-style: italic; }
